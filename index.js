@@ -72,10 +72,6 @@ https.createServer(options, app).listen(PORT, () => {
   console.log(`Secure server running on port ${PORT}`);
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
-
 // Optional: Redirect HTTP to HTTPS
 import http from "http";
 http
