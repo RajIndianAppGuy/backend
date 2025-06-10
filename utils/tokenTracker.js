@@ -10,6 +10,16 @@ const MODEL_PRICING = {
     output: 30.00,  // $30.00 per 1M output tokens
     image: 7.65,    // $7.65 per 1M image tokens
   },
+  "text-embedding-ada-002": {
+    input: 0.0001,  // $0.0001 per 1K tokens
+    output: 0,      // No output tokens for embeddings
+    image: 0,       // No image tokens for embeddings
+  },
+  "text-embedding-3-small": {
+    input: 0.00002, // $0.00002 per 1K tokens (5x cheaper than ada-002)
+    output: 0,      // No output tokens for embeddings
+    image: 0,       // No image tokens for embeddings
+  },
   // Add other models as needed
 };
 
