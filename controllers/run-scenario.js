@@ -8,6 +8,9 @@ import {
 } from "../utils/helper.js";
 import { updateTest, fetchTest } from "../supabase/tables.js";
 import tokenTracker from "../utils/tokenTracker.js";
+import { Resend } from "resend";
+
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // Deep clone utility function to prevent modifying original arrays
 function deepClone(obj) {
@@ -51,15 +54,13 @@ async function executeImportedTest(
   importedTestId,
   testId,
   logs,
-  stepResults
+  stepResults,
+  addLog
 ) {
   console.log(`Starting imported test execution ${testId},`);
   const importedTest = await fetchTest(importedTestId);
   if (importedTest) {
-    logs.push({
-      message: `Executing imported test: ${importedTest.name}`,
-      status: "info",
-    });
+    addLog(`Executing imported test: ${importedTest.name}`, "info");
 
     // Clone the imported test's steps to avoid modifying main test steps
     const clonedImportedSteps = deepClone(importedTest.steps);
@@ -73,18 +74,13 @@ async function executeImportedTest(
       importedTest.name,
       logs,
       stepResults,
-      true
+      true,
+      addLog
     );
 
-    logs.push({
-      message: `Completed imported test: ${importedTest.name}`,
-      status: "success",
-    });
+    addLog(`Completed imported test: ${importedTest.name}`, "success");
   } else {
-    logs.push({
-      message: `Failed to import test: ${importedTestId}`,
-      status: "error",
-    });
+    addLog(`Failed to import test: ${importedTestId}`, "error");
   }
 }
 
@@ -97,7 +93,8 @@ async function executeSteps(
   name,
   logs,
   screenShots,
-  isReusable = false
+  isReusable = false,
+  addLog
 ) {
   let currentUrl = startUrl;
   let count = 0;
@@ -163,10 +160,7 @@ async function executeSteps(
           step.chunk = res2.data.data;
         }
       } catch (error) {
-        logs.push({
-          message: `Error in updating step: ${error.message}`,
-          status: "error",
-        });
+        addLog(`Error in updating step: ${error.message}`, "error");
         throw new Error(`Error in updating step: ${error.message}`);
       }
     } else {
@@ -176,10 +170,7 @@ async function executeSteps(
     try {
       switch (step.actionType) {
         case "Click Element":
-          logs.push({
-            message: `Clicking on element: "${step.details.element}"`,
-            status: "info",
-          });
+          addLog(`Clicking on element: "${step.details.element}"`, "info");
           const clickImage = await captureAndStoreScreenshot(
             page,
             testId,
@@ -206,7 +197,6 @@ async function executeSteps(
             page,
             step.selector)
           
-
           const screenshotUrlBeforeClick = await captureAndStoreScreenshot(
             page,
             testId,
@@ -214,7 +204,18 @@ async function executeSteps(
           );
 
           screenShots.push(screenshotUrlBeforeClick);
-          await page.locator(step.selector).click()
+          
+          // Use performWithRetry for click action
+          await performWithRetry(
+            page,
+            async (selector) => await page.locator(selector).click(),
+            3,
+            step,
+            name,
+            'click',
+            screenshotUrlBeforeClick,
+            ''
+          );
 
           await page.waitForTimeout(4000);
 
@@ -226,17 +227,11 @@ async function executeSteps(
 
           screenShots.push(screenshotUrlAfterClick);
 
-          logs.push({
-            message: `Element "${step.details.element}" clicked successfully`,
-            status: "success",
-          });
+          addLog(`Element "${step.details.element}" clicked successfully`, "success");
           break;
 
         case "Fill Input":
-          logs.push({
-            message: `Filling input: "${step.details.description}" with value: "${step.details.value}"`,
-            status: "info",
-          });
+          addLog(`Filling input: "${step.details.description}" with value: "${step.details.value}"`, "info");
 
           const inputImage = await captureAndStoreScreenshot(
             page,
@@ -272,9 +267,17 @@ async function executeSteps(
 
           screenShots.push(screenshotUrlbeforeInput);
 
-
-
-          await page.locator(step.selector).fill(step.details.value);
+          // Use performWithRetry for fill action
+          await performWithRetry(
+            page,
+            async (selector) => await page.locator(selector).fill(step.details.value),
+            3,
+            step,
+            name,
+            'fill',
+            screenshotUrlbeforeInput,
+            ''
+          );
 
           const screenshotUrlAfterInput = await captureAndStoreScreenshot(
             page,
@@ -283,17 +286,11 @@ async function executeSteps(
           );
 
           screenShots.push(screenshotUrlAfterInput);
-          logs.push({
-            message: `Input "${step.details.description}" filled successfully`,
-            status: "success",
-          });
+          addLog(`Input "${step.details.description}" filled successfully`, "success");
           break;
 
         case "AI Visual Assertion":
-          logs.push({
-            message: `Performing AI Visual Assertion: "${step.question}"`,
-            status: "info",
-          });
+          addLog(`Performing AI Visual Assertion: "${step.question}"`, "info");
           const screenshotUrl = await captureAndStoreScreenshot(
             page,
             testId,
@@ -306,14 +303,11 @@ async function executeSteps(
           console.log(analysisResult);
           screenShots.push(screenshotUrl);
 
-          logs.push({ message: `${analysisResult}`, status: "info" });
+          addLog(`${analysisResult}`, "info");
           break;
 
         case "Delay":
-          logs.push({
-            message: `Waiting for ${step.delayTime} milliseconds`,
-            status: "info",
-          });
+          addLog(`Waiting for ${step.delayTime} milliseconds`, "info");
           const screenshotUrlBeforeDelay = await captureAndStoreScreenshot(
             page,
             testId,
@@ -325,7 +319,7 @@ async function executeSteps(
             testId,
             step.id
           );
-          logs.push({ message: "Wait completed", status: "success" });
+          addLog("Wait completed", "success");
           screenShots.push(screenshotUrlBeforeDelay);
           screenShots.push(screenshotUrlAfterDelay);
           break;
@@ -338,28 +332,20 @@ async function executeSteps(
               step.importedTestId,
               testId,
               logs,
-              stepResults
+              steps,
+              addLog
             );
           } else {
-            logs.push({
-              message: `Skipping nested import of reusable test to prevent recursion`,
-              status: "warning",
-            });
+            addLog(`Skipping nested import of reusable test to prevent recursion`, "warning");
           }
           break;
 
         default:
-          logs.push({
-            message: `Unknown action type: ${step.actionType}`,
-            status: "error",
-          });
+          addLog(`Unknown action type: ${step.actionType}`, "error");
           throw new Error(`Unknown action type: ${step.actionType}`);
       }
     } catch (error) {
-      logs.push({
-        message: `Error in step ${index + 1}: ${error.message}`,
-        status: "error",
-      });
+      addLog(`Error in step ${index + 1}: ${error.message}`, "error");
       throw error;
     }
 
@@ -379,15 +365,28 @@ export default async function RunScenario(req, res) {
   let screenShots = [];
 
   try {
-    let { startUrl, name, steps, testId } = req.body;
+    let { startUrl, name, steps, testId, email } = req.body;
 
-    logs.push({ message: `Starting scenario: ${name}`, status: "info" });
+    const addLog = (message, status) => {
+      logs.push({
+        message,
+        status,
+        timestamp: new Date().toLocaleString('en-US', {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: true
+        })
+      });
+    };
+
+    addLog(`Starting scenario: ${name}`, "info");
 
     if (!startUrl || !steps || !name) {
-      logs.push({
-        message: "Error: Missing required parameters",
-        status: "error",
-      });
+      addLog("Error: Missing required parameters", "error");
       return res.status(404).json({
         status: "error",
         message: "Something is missing",
@@ -401,9 +400,13 @@ export default async function RunScenario(req, res) {
     const context = await browser.newContext();
     const page = await context.newPage();
 
+    if(email == "raj@indianappguy.com"){
+      email = "rajdama1729@gmail.com"
+    }
+
     try {
       await page.goto(startUrl, { timeout: 900000 });
-      logs.push({ message: `Navigated to ${startUrl}`, status: "success" });
+      addLog(`Navigated to ${startUrl}`, "success");
 
       console.log(
         `starting execution for test ${testId}, name ${name},steps:`,
@@ -418,12 +421,101 @@ export default async function RunScenario(req, res) {
         startUrl,
         name,
         logs,
-        screenShots
+        screenShots,
+        false,
+        addLog
       );
 
       // Get token usage and cost
       const tokenUsage = tokenTracker.getUsage();
       console.log(tokenUsage);
+
+      // Create a more attractive email template
+      const getStatusColor = (status) => {
+        switch(status) {
+          case 'success': return '#4CAF50';
+          case 'error': return '#f44336';
+          case 'warning': return '#ff9800';
+          case 'info': return '#2196F3';
+          default: return '#757575';
+        }
+      };
+
+      const getStatusIcon = (status) => {
+        switch(status) {
+          case 'success': return '✅';
+          case 'error': return '❌';
+          case 'warning': return '⚠️';
+          case 'info': return 'ℹ️';
+          default: return '•';
+        }
+      };
+
+      const formatTimestamp = () => {
+        const now = new Date();
+        return now.toLocaleString('en-US', {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: true
+        });
+      };
+
+      const emailTemplate = `
+        <div style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f9f9f9;">
+          <div style="background-color: #2196F3; color: white; padding: 20px; border-radius: 5px 5px 0 0;">
+            <h1 style="margin: 0;">Test Execution Report</h1>
+            <p style="margin: 5px 0 0 0;">${name}</p>
+          </div>
+          
+          <div style="background-color: white; padding: 20px; border-radius: 0 0 5px 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <div style="margin-bottom: 20px;">
+              <h2 style="color: #333; margin-bottom: 10px;">Execution Summary</h2>
+              <p style="margin: 5px 0;"><strong>Test ID:</strong> ${testId}</p>
+              <p style="margin: 5px 0;"><strong>Start URL:</strong> ${startUrl}</p>
+              <p style="margin: 5px 0;"><strong>Execution Time:</strong> ${logs[0].timestamp}</p>
+            </div>
+
+            <div style="margin-bottom: 20px;">
+              <h2 style="color: #333; margin-bottom: 10px;">Token Usage</h2>
+              <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px;">
+                <p style="margin: 5px 0;"><strong>Total Tokens:</strong> ${tokenUsage.totalTokens}</p>
+                <p style="margin: 5px 0;"><strong>Estimated Cost:</strong> $${tokenUsage.cost}</p>
+                <p style="margin: 5px 0;"><strong>Model Used:</strong> ${tokenUsage.model}</p>
+              </div>
+            </div>
+
+            <div>
+              <h2 style="color: #333; margin-bottom: 10px;">Execution Logs</h2>
+              ${logs.map(log => `
+                <div style="margin: 10px 0; padding: 10px; border-left: 4px solid ${getStatusColor(log.status)}; background-color: #f8f9fa;">
+                  <div style="display: flex; align-items: center;">
+                    <span style="margin-right: 10px;">${getStatusIcon(log.status)}</span>
+                    <span style="color: ${getStatusColor(log.status)}; font-weight: bold;">${log.status.toUpperCase()}</span>
+                    <span style="margin-left: auto; color: #666; font-size: 0.9em;">${log.timestamp}</span>
+                  </div>
+                  <p style="margin: 5px 0 0 0; color: #333;">${log.message}</p>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+
+          <div style="text-align: center; margin-top: 20px; color: #666; font-size: 0.9em;">
+            <p>This is an automated report generated by MagicSlides Test Runner</p>
+          </div>
+        </div>
+      `;
+
+      const data = await resend.emails.send({
+        from: "support@magicslides.io",
+        to: email,
+        subject: `Test Execution Report: ${name}`,
+        html: emailTemplate
+      });
+      console.log("=======================>",data);
       
       return res.status(200).json({
         status: "success",
@@ -439,10 +531,7 @@ export default async function RunScenario(req, res) {
         }
       });
     } catch (error) {
-      logs.push({
-        message: `Error during test execution: ${error.message}`,
-        status: "error",
-      });
+      addLog(`Error during test execution: ${error.message}`, "error");
       return res.status(500).json({
         status: "error",
         message: `Error during test execution: ${error.message}`,
@@ -455,10 +544,7 @@ export default async function RunScenario(req, res) {
       if (browser) await browser.close();
     }
   } catch (error) {
-    logs.push({
-      message: `Fatal error in run scenario: ${error.message}`,
-      status: "error",
-    });
+    addLog(`Fatal error in run scenario: ${error.message}`, "error");
     return res.status(500).json({
       status: "error",
       message: `Something went wrong in run scenario: ${error.message}`,
@@ -470,6 +556,7 @@ export default async function RunScenario(req, res) {
 
 // Retry logic if an action fails
 async function performWithRetry(
+  page,
   action,
   retries,
   step,
@@ -482,7 +569,40 @@ async function performWithRetry(
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      await action(step.selector);
+      // Modified to handle multiple elements by selecting the visible one
+      const elements = await page.locator(step.selector).all();
+      if (elements.length > 1) {
+        console.log(`Found ${elements.length} matching elements, checking visibility...`);
+        // Find the first visible element
+        let visibleElement = null;
+        for (const element of elements) {
+          const isVisible = await element.isVisible();
+          if (isVisible) {
+            visibleElement = element;
+            break;
+          }
+        }
+        
+        if (visibleElement) {
+          console.log('Clicking visible element');
+          await visibleElement.click();
+        } else {
+          // If no visible element found, try to make the element visible
+          console.log('No visible element found, attempting to make element visible');
+          await page.evaluate((selector) => {
+            const elements = document.querySelectorAll(selector);
+            for (const element of elements) {
+              element.style.display = 'block';
+              element.style.visibility = 'visible';
+              element.style.opacity = '1';
+            }
+          }, step.selector);
+          // Try clicking the first element after making it visible
+          await elements[0].click();
+        }
+      } else {
+        await action(step.selector);
+      }
       return step; // If action succeeds, return the updated step
     } catch (error) {
       console.error(
